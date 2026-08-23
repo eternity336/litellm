@@ -41,22 +41,25 @@ jobs:
             echo "Synced fork with upstream base."
           fi
 
-      - name: Ensure Gitea image repository exists
+      - name: Check Gitea image repository
         env:
           GITEA_REGISTRY: ${{ secrets.GITEA_REGISTRY }}
           GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
         run: |
           set -euo pipefail
-          if [ "$(curl -s -o /dev/null -w '%{http_code}' \
-              -H "Authorization: token $GITEA_TOKEN" \
-              "https://${GITEA_REGISTRY}/api/v1/repos/jochsankehl/litellm")" = "200" ]; then
-            echo "Image repository jochsankehl/litellm already exists."
+          if [ -z "${GITEA_REGISTRY:-}" ] || [ -z "${GITEA_TOKEN:-}" ]; then
+            echo "::error::GITEA_REGISTRY or GITEA_TOKEN is not set in the fork's Actions secrets."
+            exit 1
+          fi
+          code=$(curl -s -o /tmp/gitea.json -w '%{http_code}' \
+            -H "Authorization: token $GITEA_TOKEN" \
+            "https://${GITEA_REGISTRY}/api/v1/repos/jochsankehl/litellm")
+          if [ "${code}" = "200" ]; then
+            echo "Image repository jochsankehl/litellm is present."
           else
-            curl -fsSL -X POST -H "Authorization: token $GITEA_TOKEN" \
-              -H "Content-Type: application/json" \
-              -d '{"name": "litellm", "auto_init": true, "mirror": true, "private": true}' \
-              "https://${GITEA_REGISTRY}/api/v1/user/repos" >/dev/null
-            echo "Created image repository jochsankehl/litellm."
+            echo "::error::Gitea returned ${code} for jochsankehl/litellm: $(cat /tmp/gitea.json)"
+            echo "::error::Create the repository in the Gitea UI (name: litellm) and enable it under Settings, Features, Container Image. The API cannot create or enable container image repositories."
+            exit 1
           fi
 
       - name: Build and push image
