@@ -2,7 +2,7 @@ name: Sync upstream and publish dark-mode image
 
 # Keeps this fork's litellm_internal_staging in sync with
 # BerriAI/litellm:litellm_internal_staging and publishes the themed proxy
-# image to the owner's Gitea registry on every run. Fails email
+# image to ghcr.io/eternity336/litellm on every run. Fails email
 # eternity336@gmail.com when any part of the run goes wrong.
 
 on:
@@ -20,13 +20,12 @@ jobs:
     steps:
       - name: Check required secrets
         env:
-          GITEA_REGISTRY: ${{ secrets.GITEA_REGISTRY }}
-          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: |
           set -uo pipefail
-          for name in GITEA_REGISTRY GITEA_TOKEN GMAIL_USER GMAIL_APP_PASSWORD; do
+          for name in GHCR_TOKEN GMAIL_USER GMAIL_APP_PASSWORD; do
             value="${!name:-}"
             if [ -z "${value}" ]; then
               echo "::error::Secret ${name} is not set (or empty) on the fork."
@@ -34,8 +33,8 @@ jobs:
               echo "Secret ${name}: present (${#value} chars)"
             fi
           done
-          if [ -z "${GITEA_REGISTRY:-}" ] || [ -z "${GITEA_TOKEN:-}" ] \
-            || [ -z "${GMAIL_USER:-}" ] || [ -z "${GMAIL_APP_PASSWORD:-}" ]; then
+          if [ -z "${GHCR_TOKEN:-}" ] || [ -z "${GMAIL_USER:-}" ] \
+            || [ -z "${GMAIL_APP_PASSWORD:-}" ]; then
             exit 1
           fi
 
@@ -64,38 +63,21 @@ jobs:
             echo "Synced fork with upstream base."
           fi
 
-      - name: Check Gitea image repository
-        env:
-          GITEA_REGISTRY: ${{ secrets.GITEA_REGISTRY }}
-          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
-        run: |
-          set -euo pipefail
-          code=$(curl -s -o /tmp/gitea.json -w '%{http_code}' \
-            -H "Authorization: token $GITEA_TOKEN" \
-            "https://${GITEA_REGISTRY}/api/v1/repos/jochsankehl/litellm")
-          if [ "${code}" = "200" ]; then
-            echo "Image repository jochsankehl/litellm is present."
-          else
-            echo "::error::Gitea returned ${code} for jochsankehl/litellm: $(cat /tmp/gitea.json)"
-            echo "::error::Create the repository in the Gitea UI (name: litellm) and enable it under Settings, Features, Container Image. The API cannot create or enable container image repositories."
-            exit 1
-          fi
-
       - name: Build and push image
         env:
-          GITEA_REGISTRY: ${{ secrets.GITEA_REGISTRY }}
-          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
         run: |
           set -euo pipefail
           sha=$(git rev-parse --short HEAD)
-          echo "Building ${GITEA_REGISTRY}/jochsankehl/litellm:latest-darkmode from commit ${sha}..."
+          image="ghcr.io/eternity336/litellm"
+          echo "Building ${image}:latest-darkmode from commit ${sha}..."
           docker build --platform linux/amd64 \
-            -t "${GITEA_REGISTRY}/jochsankehl/litellm:latest-darkmode" \
-            -t "${GITEA_REGISTRY}/jochsankehl/litellm:${sha}" . 2>&1 | tee /tmp/build.log
-          echo "${GITEA_TOKEN}" | docker login "${GITEA_REGISTRY}" --username jochsankehl --password-stdin
-          docker push "${GITEA_REGISTRY}/jochsankehl/litellm:latest-darkmode"
-          docker push "${GITEA_REGISTRY}/jochsankehl/litellm:${sha}"
-          echo "Pushed ${GITEA_REGISTRY}/jochsankehl/litellm:latest-darkmode and :${sha}."
+            -t "${image}:latest-darkmode" \
+            -t "${image}:${sha}" . 2>&1 | tee /tmp/build.log
+          echo "${GHCR_TOKEN}" | docker login ghcr.io --username eternity336 --password-stdin
+          docker push "${image}:latest-darkmode"
+          docker push "${image}:${sha}"
+          echo "Pushed ${image}:latest-darkmode and ${image}:${sha}."
 
       - name: Keep build log tail for the failure email
         if: failure()
