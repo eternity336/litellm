@@ -54,14 +54,32 @@ jobs:
           base=$(git rev-parse upstream/litellm_internal_staging)
           if [ "$(git merge-base HEAD "$base")" = "$base" ]; then
             echo "Upstream has not advanced; nothing to sync."
-          else
-            git merge --no-edit "$base"
-            if ! git push origin HEAD:"${GITHUB_REF_NAME}"; then
-              echo "::error::Pushing the merged base failed. A real merge conflict needs manual resolution; the next scheduled run retries."
-              exit 1
-            fi
-            echo "Synced fork with upstream base."
+            exit 0
           fi
+          # Merge without committing so the inherited workflows upstream
+          # re-added can be stripped before the merge commit is created.
+          git merge --no-edit --no-commit --no-ff "$base" || true
+          # This fork ships a themed image; it is not a development repo. The
+          # only workflow allowed to run here is sync-and-image.yml. Keep our
+          # deletions when upstream modified a file we removed.
+          while IFS= read -r line; do
+            case "${line:0:2}" in
+              DU | DD) git rm -f -q -- "${line:3}" ;;
+            esac
+          done < <(git status --porcelain)
+          find .github/workflows -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) ! -name 'sync-and-image.yml' -delete
+          git add -A -- .github/workflows
+          if [ -n "$(git ls-files -u)" ]; then
+            echo "::error::Upstream changed the same lines the fork changed. Resolve the merge manually; the next scheduled run retries."
+            git merge --abort
+            exit 1
+          fi
+          git commit --no-edit
+          if ! git push origin HEAD:"${GITHUB_REF_NAME}"; then
+            echo "::error::Pushing the merged base failed. The next scheduled run retries."
+            exit 1
+          fi
+          echo "Synced fork with upstream base."
 
       - name: Build and push image
         env:
