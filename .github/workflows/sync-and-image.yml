@@ -56,14 +56,14 @@ jobs:
           set -euo pipefail
           pr=$(curl -fsSL -H "Authorization: token $GH_TOKEN" \
             "https://api.github.com/repos/BerriAI/litellm/pulls?state=open&head=eternity336:litellm_internal_staging" \
-            | jq -r 'first | .number // empty')
+            | jq -r 'if type == "array" and length > 0 then .[0].number else empty end')
           if [ -z "${pr}" ]; then
-            echo "::error::No open PR found for eternity336:litellm_internal_staging into BerriAI/litellm."
+            echo "::error::No open PR found for eternity336:litellm_internal_staging into BerriAI/litellm. It may have been closed or merged."
             exit 1
           fi
           state=$(curl -fsSL -H "Authorization: token $GH_TOKEN" \
             "https://api.github.com/repos/BerriAI/litellm/pulls/${pr}/reviews" \
-            | jq -r '.[-1].state // empty')
+            | jq -r 'if type == "array" and length > 0 then .[-1].state else empty end')
           echo "pr=${pr}" >> "$GITHUB_OUTPUT"
           echo "state=${state}" >> "$GITHUB_OUTPUT"
           echo "Latest review state for PR #${pr}: ${state:-none}"
