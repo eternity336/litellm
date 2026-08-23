@@ -89,11 +89,21 @@ jobs:
           echo "Building ${GITEA_REGISTRY}/jochsankehl/litellm:latest-darkmode from commit ${sha}..."
           docker build --platform linux/amd64 \
             -t "${GITEA_REGISTRY}/jochsankehl/litellm:latest-darkmode" \
-            -t "${GITEA_REGISTRY}/jochsankehl/litellm:${sha}" .
+            -t "${GITEA_REGISTRY}/jochsankehl/litellm:${sha}" . 2>&1 | tee /tmp/build.log
           echo "${GITEA_TOKEN}" | docker login "${GITEA_REGISTRY}" --username jochsankehl --password-stdin
           docker push "${GITEA_REGISTRY}/jochsankehl/litellm:latest-darkmode"
           docker push "${GITEA_REGISTRY}/jochsankehl/litellm:${sha}"
           echo "Pushed ${GITEA_REGISTRY}/jochsankehl/litellm:latest-darkmode and :${sha}."
+
+      - name: Keep build log tail for the failure email
+        if: failure()
+        id: buildtail
+        run: |
+          {
+            echo "buildlogtail<<GITHUB_EOF"
+            tail -n 60 /tmp/build.log 2>/dev/null || echo "no build log was captured (failure happened before docker build)"
+            echo "GITHUB_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Notify on failure
         if: failure()
@@ -110,3 +120,6 @@ jobs:
             The sync-and-image workflow failed.
             Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
             Commit: ${{ github.sha }}
+
+            Build log tail:
+            ${{ steps.buildtail.outputs.buildlogtail }}
