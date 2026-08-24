@@ -9,7 +9,7 @@ from typing import Any, Final, Protocol, TypeVar
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
-from pydantic import ConfigDict, JsonValue, ValidationError, create_model, field_validator
+from pydantic import ConfigDict, JsonValue, TypeAdapter, ValidationError, create_model, field_validator
 from pydantic.fields import FieldInfo
 
 import litellm
@@ -219,6 +219,66 @@ def _validate_theme_css(css: str) -> None:
                 raise ValueError(f"Unknown theme variable --{m.group(1)}")
 
 
+# A single CSS color value. Anchored so nothing but a well-formed value passes:
+# hex, a standard color function, or a safe keyword. Blocks any `;`, `}`, or
+# `</style>` breakout when the frontend assembles the injected stylesheet.
+_THEME_COLOR_VALUE_RE: Final = re.compile(
+    r"^(?:"
+    r"#[0-9a-fA-F]{3,8}"
+    r"|(?:rgb|rgba|hsl|hsla|oklch|oklab|lab|color)\([^)]*\)"
+    r"|(?:transparent|currentcolor|inherit|initial|unset|revert)"
+    r")$",
+    re.IGNORECASE,
+)
+
+
+class UIThemePalette(BaseModel):
+    """A single flat set of theme CSS-variable overrides.
+
+    Applied identically to both :root and .dark so a named theme renders the
+    same regardless of the light/dark toggle.
+    """
+
+    colors: dict[str, str] = Field(
+        default_factory=dict,
+        description="Map of theme CSS variable name to color value",
+    )
+
+    @field_validator("colors")
+    @classmethod
+    def check_colors(cls, value: dict[str, str]) -> dict[str, str]:
+        for key, color in value.items():
+            if key not in _ALLOWED_THEME_VARS:
+                raise ValueError(f"Unknown theme variable --{key}")
+            if not _THEME_COLOR_VALUE_RE.match(color):
+                raise ValueError(f"Invalid color value for --{key}: {color}")
+        return value
+
+
+class UITheme(BaseModel):
+    """A named, shareable theme: a display name plus a flat color palette."""
+
+    name: str = Field(
+        min_length=1,
+        max_length=64,
+        description="Human-readable theme name",
+    )
+    palette: UIThemePalette = Field(default_factory=UIThemePalette)
+
+    @field_validator("name")
+    @classmethod
+    def check_name(cls, value: str) -> str:
+        stripped: Final = value.strip()
+        if not stripped:
+            raise ValueError("Theme name must not be blank")
+        if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in stripped):
+            raise ValueError("Theme name contains control characters")
+        return stripped
+
+
+_UI_THEME_LIST_ADAPTER: Final = TypeAdapter(list[UITheme])
+
+
 class UIThemeConfig(BaseModel):
     """Configuration for UI theme customization"""
 
@@ -257,6 +317,25 @@ class UIThemeConfig(BaseModel):
     def check_custom_theme_css(cls, value: str | None) -> str | None:
         if value:
             _validate_theme_css(value)
+        return value
+
+    # Named, shareable themes: admins manage them, every user reads the list and
+    # applies exactly one (per-user selection is stored in the browser, not here).
+    themes: list[UITheme] = Field(
+        default_factory=list,
+        description=(
+            "Named themes available to all users. Admins create/edit/delete them; "
+            "users pick one to apply. Each theme is a flat palette applied to both "
+            "light and dark mode."
+        ),
+    )
+
+    @field_validator("themes")
+    @classmethod
+    def check_unique_theme_names(cls, value: list[UITheme]) -> list[UITheme]:
+        lowered: Final = tuple(theme.name.lower() for theme in value)
+        if len(set(lowered)) != len(lowered):
+            raise ValueError("Theme names must be unique (case-insensitive)")
         return value
 
 
@@ -1220,15 +1299,38 @@ def _stored_ui_theme_css_is_safe(css: object) -> bool:
     return True
 
 
-def _sanitize_stored_ui_theme_css_for_read(config: dict) -> dict:
-    """Return config unchanged when the stored custom_theme_css is absent or valid,
-    otherwise a shallow copy with that field blanked, so the read path can construct
-    UIThemeConfig(**stored) without raising on the public, unauthenticated GET."""
+def _stored_ui_themes_are_safe(themes: object) -> bool:
+    """True when a stored themes list constructs UITheme entries cleanly.
+
+    Guards the public GET against a hand-written config.yaml whose themes would
+    otherwise raise during model construction and surface as an unauthenticated 500.
+    """
+    if not isinstance(themes, list):
+        return False
+    try:
+        _UI_THEME_LIST_ADAPTER.validate_python(themes)
+    except (ValidationError, TypeError):
+        return False
+    return True
+
+
+def _sanitize_stored_ui_theme_for_read(config: dict) -> dict:
+    """Return config unchanged when the stored ui_theme_config is absent or fully
+    valid, otherwise a shallow copy with any invalid field blanked, so the read
+    path can construct UIThemeConfig(**stored) without raising on the public,
+    unauthenticated GET."""
     stored: Final = (config.get("litellm_settings") or {}).get("ui_theme_config") or {}
     css: Final = stored.get("custom_theme_css")
-    if css is None or _stored_ui_theme_css_is_safe(css):
+    themes: Final = stored.get("themes")
+    css_safe: Final = css is None or _stored_ui_theme_css_is_safe(css)
+    themes_safe: Final = themes is None or _stored_ui_themes_are_safe(themes)
+    if css_safe and themes_safe:
         return config
-    ui_theme_config: Final = {**stored, "custom_theme_css": None}
+    ui_theme_config: Final = {
+        **stored,
+        **({} if css_safe else {"custom_theme_css": None}),
+        **({} if themes_safe else {"themes": []}),
+    }
     litellm_settings: Final = {**(config.get("litellm_settings") or {}), "ui_theme_config": ui_theme_config}
     return {**config, "litellm_settings": litellm_settings}
 
@@ -1254,7 +1356,7 @@ async def get_ui_theme_settings():
     result: Final = await _get_settings_with_schema(
         settings_key="ui_theme_config",
         settings_class=UIThemeConfig,
-        config=_sanitize_stored_ui_theme_css_for_read(config),
+        config=_sanitize_stored_ui_theme_for_read(config),
     )
 
     stored_values: Final = result.get("values", {})

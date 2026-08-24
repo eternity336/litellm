@@ -1417,6 +1417,155 @@ class TestProxySettingEndpoints:
         )
         assert response.status_code == 200
 
+    def test_get_ui_theme_settings_returns_themes(self, mock_proxy_config):
+        """A named theme stored by an admin is read back for every (unauthenticated) caller."""
+        mock_proxy_config["config"]["litellm_settings"]["ui_theme_config"] = {
+            "themes": [
+                {
+                    "name": "Midnight",
+                    "palette": {
+                        "colors": {
+                            "background": "#0f0f1a",
+                            "primary": "#e94560",
+                        }
+                    },
+                }
+            ]
+        }
+
+        response = client.get("/get/ui_theme_settings")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["values"]["themes"] == [
+            {
+                "name": "Midnight",
+                "palette": {"colors": {"background": "#0f0f1a", "primary": "#e94560"}},
+            }
+        ]
+
+    def test_get_ui_theme_settings_themes_default_to_empty(self, mock_proxy_config):
+        """With no stored ui_theme_config, themes reads back as an empty list."""
+        response = client.get("/get/ui_theme_settings")
+
+        assert response.status_code == 200
+        assert response.json()["values"]["themes"] == []
+
+    def test_update_ui_theme_settings_creates_theme(self, mock_proxy_config, mock_auth, monkeypatch):
+        """An admin can store a named theme; it persists and returns in the response."""
+        monkeypatch.setenv("LITELLM_SALT_KEY", "test_salt_key")
+        monkeypatch.setattr("litellm.proxy.proxy_server.store_model_in_db", True)
+
+        new_theme = {
+            "themes": [
+                {
+                    "name": "Midnight",
+                    "palette": {
+                        "colors": {
+                            "background": "#0f0f1a",
+                            "primary": "#e94560",
+                            "card": "#1a1a2e",
+                        }
+                    },
+                }
+            ]
+        }
+
+        response = client.patch("/update/ui_theme_settings", json=new_theme)
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "success"
+        assert data["theme_config"]["themes"] == new_theme["themes"]
+        assert mock_proxy_config["save_call_count"]() == 1
+
+    def test_update_ui_theme_settings_theme_rejects_unknown_var(self, mock_proxy_config, mock_auth, monkeypatch):
+        monkeypatch.setenv("LITELLM_SALT_KEY", "test_salt_key")
+        monkeypatch.setattr("litellm.proxy.proxy_server.store_model_in_db", True)
+
+        response = client.patch(
+            "/update/ui_theme_settings",
+            json={"themes": [{"name": "Bad", "palette": {"colors": {"evil-injection": "#000"}}}]},
+        )
+        assert response.status_code == 422
+
+    def test_update_ui_theme_settings_theme_rejects_invalid_color(self, mock_proxy_config, mock_auth, monkeypatch):
+        """A color value that is not a well-formed CSS color is refused, blocking any
+        `;` / `}` / `</style>` breakout when the frontend builds the injected sheet."""
+        monkeypatch.setenv("LITELLM_SALT_KEY", "test_salt_key")
+        monkeypatch.setattr("litellm.proxy.proxy_server.store_model_in_db", True)
+
+        response = client.patch(
+            "/update/ui_theme_settings",
+            json={"themes": [{"name": "Bad", "palette": {"colors": {"background": "javascript:alert(1)"}}}]},
+        )
+        assert response.status_code == 422
+
+    def test_update_ui_theme_settings_theme_rejects_duplicate_name(self, mock_proxy_config, mock_auth, monkeypatch):
+        """Theme names must be unique case-insensitively so the selector key stays stable."""
+        monkeypatch.setenv("LITELLM_SALT_KEY", "test_salt_key")
+        monkeypatch.setattr("litellm.proxy.proxy_server.store_model_in_db", True)
+
+        response = client.patch(
+            "/update/ui_theme_settings",
+            json={
+                "themes": [
+                    {"name": "Midnight", "palette": {"colors": {"background": "#0f0f1a"}}},
+                    {"name": "midnight", "palette": {"colors": {"primary": "#e94560"}}},
+                ]
+            },
+        )
+        assert response.status_code == 422
+
+    def test_update_ui_theme_settings_theme_rejects_blank_name(self, mock_proxy_config, mock_auth, monkeypatch):
+        monkeypatch.setenv("LITELLM_SALT_KEY", "test_salt_key")
+        monkeypatch.setattr("litellm.proxy.proxy_server.store_model_in_db", True)
+
+        response = client.patch(
+            "/update/ui_theme_settings",
+            json={"themes": [{"name": "   ", "palette": {"colors": {"background": "#0f0f1a"}}}]},
+        )
+        assert response.status_code == 422
+
+    def test_update_ui_theme_settings_theme_rejects_control_char_name(self, mock_proxy_config, mock_auth, monkeypatch):
+        monkeypatch.setenv("LITELLM_SALT_KEY", "test_salt_key")
+        monkeypatch.setattr("litellm.proxy.proxy_server.store_model_in_db", True)
+
+        response = client.patch(
+            "/update/ui_theme_settings",
+            json={"themes": [{"name": "Evil\nName", "palette": {"colors": {"background": "#0f0f1a"}}}]},
+        )
+        assert response.status_code == 422
+
+    def test_get_ui_theme_settings_does_not_500_on_invalid_stored_themes(self, monkeypatch):
+        """A hand-written config.yaml with an invalid stored theme must not 500 the
+        public read. The bad themes list is withheld (empty) and the rest loads."""
+        from litellm.proxy.proxy_server import proxy_config
+
+        monkeypatch.delenv("UI_LOGO_PATH", raising=False)
+        monkeypatch.delenv("LITELLM_FAVICON_URL", raising=False)
+
+        stored_config = {
+            "litellm_settings": {
+                "ui_theme_config": {
+                    "themes": [{"name": "Bad", "palette": {"colors": {"background": "javascript:alert(1)"}}}],
+                    "logo_url": "https://db.example.com/logo.png",
+                }
+            }
+        }
+
+        async def mock_get_config():
+            return stored_config
+
+        monkeypatch.setattr(proxy_config, "get_config", mock_get_config)
+
+        response = client.get("/get/ui_theme_settings")
+
+        assert response.status_code == 200
+        values = response.json()["values"]
+        assert values["themes"] == []
+        assert values["logo_url"] == "https://db.example.com/logo.png"
+
     def test_get_ui_settings(self, mock_auth, monkeypatch):
         """Test retrieving UI settings with allowlist sanitization"""
         from unittest.mock import AsyncMock, MagicMock
