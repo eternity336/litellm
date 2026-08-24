@@ -1,8 +1,29 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode } from "react";
+import React, { createContext, useCallback, useContext, useState, useEffect, ReactNode } from "react";
 import { getProxyBaseUrl } from "@/components/networking";
+import { BUILTIN_THEMES, mergeThemes } from "@/lib/builtinThemes";
 
 const _BLOCK_RE = /(?::root|\.dark)\s*\{([^}]*)\}/g;
 const _DECL_RE = /^--([\w-]+)\s*:\s*(\S[^;]*)$/;
+
+export interface UITheme {
+  name: string;
+  palette: {
+    colors: Record<string, string>;
+  };
+}
+
+const ACTIVE_THEME_STORAGE_KEY = "litellm-active-theme";
+
+// A named theme is a single flat palette applied to both :root and .dark, so it
+// renders identically under the light/dark toggle.
+export function themeToCss(theme: UITheme): string {
+  const decls = Object.entries(theme.palette?.colors ?? {})
+    .filter(([, value]) => Boolean(value))
+    .map(([key, value]) => `--${key}: ${value}`)
+    .join("; ");
+  if (!decls) return "";
+  return `:root { ${decls}; }\n.dark { ${decls}; }`;
+}
 
 function sanitizeThemeCss(css: string): string | null {
   const stripped = css.replace(/\/\*[\s\S]*?\*\//g, "").trim();
@@ -31,6 +52,10 @@ interface ThemeContextType {
   setFaviconUrl: (url: string | null) => void;
   customThemeCss: string | null;
   setCustomThemeCss: (css: string | null) => void;
+  themes: UITheme[];
+  setThemes: (themes: UITheme[]) => void;
+  activeThemeId: string | null;
+  setActiveThemeId: (id: string | null) => void;
 }
 
 const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
@@ -53,6 +78,25 @@ export const ThemeProvider: React.FC<ThemeProviderProps> = ({ children, accessTo
   const [logoUrlDark, setLogoUrlDark] = useState<string | null>(null);
   const [faviconUrl, setFaviconUrl] = useState<string | null>(null);
   const [customThemeCss, setCustomThemeCss] = useState<string | null>(null);
+  const [themes, setThemes] = useState<UITheme[]>([]);
+  const [activeThemeId, setActiveThemeIdState] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    try {
+      return window.localStorage.getItem(ACTIVE_THEME_STORAGE_KEY);
+    } catch {
+      return null;
+    }
+  });
+
+  const setActiveThemeId = useCallback((id: string | null) => {
+    setActiveThemeIdState(id);
+    try {
+      if (id) window.localStorage.setItem(ACTIVE_THEME_STORAGE_KEY, id);
+      else window.localStorage.removeItem(ACTIVE_THEME_STORAGE_KEY);
+    } catch {
+      // localStorage can be unavailable (private mode); the in-memory selection still works.
+    }
+  }, []);
 
   useEffect(() => {
     const loadThemeSettings = async () => {
@@ -77,6 +121,9 @@ export const ThemeProvider: React.FC<ThemeProviderProps> = ({ children, accessTo
           }
           if (data.values?.custom_theme_css) {
             setCustomThemeCss(sanitizeThemeCss(data.values.custom_theme_css));
+          }
+          if (Array.isArray(data.values?.themes)) {
+            setThemes(data.values.themes);
           }
         }
       } catch (error) {
@@ -120,6 +167,24 @@ export const ThemeProvider: React.FC<ThemeProviderProps> = ({ children, accessTo
     }
   }, [customThemeCss]);
 
+  useEffect(() => {
+    const active = mergeThemes(BUILTIN_THEMES, themes).find((t) => t.name === activeThemeId);
+    const safe = active ? sanitizeThemeCss(themeToCss(active)) : null;
+    const existing = document.getElementById("litellm-active-theme");
+    if (safe) {
+      if (existing) {
+        existing.textContent = safe;
+      } else {
+        const style = document.createElement("style");
+        style.id = "litellm-active-theme";
+        style.textContent = safe;
+        document.head.appendChild(style);
+      }
+    } else {
+      existing?.remove();
+    }
+  }, [activeThemeId, themes]);
+
   return (
     <ThemeContext.Provider
       value={{
@@ -131,6 +196,10 @@ export const ThemeProvider: React.FC<ThemeProviderProps> = ({ children, accessTo
         setFaviconUrl,
         customThemeCss,
         setCustomThemeCss,
+        themes,
+        setThemes,
+        activeThemeId,
+        setActiveThemeId,
       }}
     >
       {children}

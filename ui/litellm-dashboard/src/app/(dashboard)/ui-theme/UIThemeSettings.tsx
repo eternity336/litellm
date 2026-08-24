@@ -1,13 +1,16 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
-import { Upload, X, ChevronDown, ChevronUp, Palette } from "lucide-react";
+import React, { useState, useEffect, useCallback } from "react";
+import { Palette, Plus, Pencil, Trash2, Download, Copy, Check, X } from "lucide-react";
+import { CopyToClipboard } from "react-copy-to-clipboard";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card, CardHeader, CardTitle, CardDescription, CardAction, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { UiLoadingSpinner } from "@/components/ui/ui-loading-spinner";
-import { useTheme } from "@/contexts/ThemeContext";
+import { ColorPicker } from "@/components/ui/color-picker";
+import { useTheme, themeToCss, type UITheme } from "@/contexts/ThemeContext";
+import { BUILTIN_THEMES, mergeThemes } from "@/lib/builtinThemes";
 import { getProxyBaseUrl, getGlobalLitellmHeaderName } from "@/components/networking";
+import { isProxyAdminRole } from "@/utils/roles";
 import { toast } from "@/lib/toast";
 
 interface UIThemeSettingsProps {
@@ -19,221 +22,138 @@ interface UIThemeSettingsProps {
 interface ColorVar {
   key: string;
   label: string;
-  description: string;
 }
 
-const LIGHT_VARS: ColorVar[] = [
-  { key: "background", label: "Background", description: "Page background" },
-  { key: "foreground", label: "Text", description: "Primary text color" },
-  { key: "card", label: "Card", description: "Card & panel background" },
-  { key: "card-foreground", label: "Card Text", description: "Text on cards" },
-  { key: "primary", label: "Primary", description: "Buttons & actions" },
-  { key: "primary-foreground", label: "Primary Text", description: "Text on primary buttons" },
-  { key: "muted", label: "Muted", description: "Subtle backgrounds" },
-  { key: "muted-foreground", label: "Muted Text", description: "Secondary text" },
-  { key: "accent", label: "Accent", description: "Highlights & hover" },
-  { key: "border", label: "Border", description: "Borders & dividers" },
+const THEME_VAR_OPTIONS: ColorVar[] = [
+  { key: "background", label: "Background" },
+  { key: "foreground", label: "Text" },
+  { key: "card", label: "Card" },
+  { key: "card-foreground", label: "Card Text" },
+  { key: "popover", label: "Popover" },
+  { key: "popover-foreground", label: "Popover Text" },
+  { key: "primary", label: "Primary" },
+  { key: "primary-foreground", label: "Primary Text" },
+  { key: "secondary", label: "Secondary" },
+  { key: "secondary-foreground", label: "Secondary Text" },
+  { key: "muted", label: "Muted" },
+  { key: "muted-foreground", label: "Muted Text" },
+  { key: "accent", label: "Accent" },
+  { key: "accent-foreground", label: "Accent Text" },
+  { key: "destructive", label: "Destructive" },
+  { key: "destructive-foreground", label: "Destructive Text" },
+  { key: "success", label: "Success" },
+  { key: "success-foreground", label: "Success Text" },
+  { key: "warning", label: "Warning" },
+  { key: "warning-foreground", label: "Warning Text" },
+  { key: "info", label: "Info" },
+  { key: "info-foreground", label: "Info Text" },
+  { key: "border", label: "Border" },
+  { key: "input", label: "Input" },
+  { key: "ring", label: "Ring" },
+  { key: "chart-1", label: "Chart 1" },
+  { key: "chart-2", label: "Chart 2" },
+  { key: "chart-3", label: "Chart 3" },
+  { key: "chart-4", label: "Chart 4" },
+  { key: "chart-5", label: "Chart 5" },
 ];
 
-const DARK_VARS: ColorVar[] = [
-  { key: "background", label: "Background", description: "Page background" },
-  { key: "foreground", label: "Text", description: "Primary text color" },
-  { key: "card", label: "Card", description: "Card & panel background" },
-  { key: "card-foreground", label: "Card Text", description: "Text on cards" },
-  { key: "primary", label: "Primary", description: "Buttons & actions" },
-  { key: "primary-foreground", label: "Primary Text", description: "Text on primary buttons" },
-  { key: "muted", label: "Muted", description: "Subtle backgrounds" },
-  { key: "muted-foreground", label: "Muted Text", description: "Secondary text" },
-  { key: "accent", label: "Accent", description: "Highlights & hover" },
-  { key: "border", label: "Border", description: "Borders & dividers" },
-];
-
-function generateCss(
-  lightColors: Record<string, string>,
-  darkColors: Record<string, string>,
-  advancedCss: string
-): string {
-  const parts: string[] = [];
-  const lightRules = Object.entries(lightColors).filter(([, v]) => v);
-  const darkRules = Object.entries(darkColors).filter(([, v]) => v);
-
-  if (lightRules.length > 0) {
-    parts.push(`:root {\n  ${lightRules.map(([k, v]) => `--${k}: ${v};`).join("\n  ")}\n}`);
-  }
-  if (darkRules.length > 0) {
-    parts.push(`.dark {\n  ${darkRules.map(([k, v]) => `--${k}: ${v};`).join("\n  ")}\n}`);
-  }
-  if (advancedCss.trim()) {
-    parts.push(advancedCss.trim());
-  }
-  return parts.join("\n\n");
+interface ThemeEditorState {
+  open: boolean;
+  draftName: string;
+  draftColors: Record<string, string>;
+  editingOriginalName: string | null;
 }
 
-const UIThemeSettings: React.FC<UIThemeSettingsProps> = ({ userID, userRole, accessToken }) => {
-  const { setLogoUrl, setLogoUrlDark, setFaviconUrl, setCustomThemeCss } = useTheme();
+const CLOSED_EDITOR: ThemeEditorState = { open: false, draftName: "", draftColors: {}, editingOriginalName: null };
+
+const safeFilename = (name: string) => name.replace(/[^a-zA-Z0-9-_]+/g, "-").replace(/^-+|-+$/g, "") || "theme";
+
+const UIThemeSettings: React.FC<UIThemeSettingsProps> = ({ userRole, accessToken }) => {
+  const {
+    logoUrl,
+    setLogoUrl,
+    logoUrlDark,
+    setLogoUrlDark,
+    faviconUrl,
+    setFaviconUrl,
+    customThemeCss,
+    themes,
+    setThemes,
+    activeThemeId,
+    setActiveThemeId,
+  } = useTheme();
+
+  const isAdmin = isProxyAdminRole(userRole ?? "");
+
+  const allThemes = mergeThemes(BUILTIN_THEMES, themes);
+
   const [logoUrlInput, setLogoUrlInput] = useState<string>("");
   const [logoUrlDarkInput, setLogoUrlDarkInput] = useState<string>("");
   const [faviconUrlInput, setFaviconUrlInput] = useState<string>("");
-  const [lightColors, setLightColors] = useState<Record<string, string>>({});
-  const [darkColors, setDarkColors] = useState<Record<string, string>>({});
-  const [advancedCss, setAdvancedCss] = useState<string>("");
-  const [showAdvanced, setShowAdvanced] = useState(false);
   const [loading, setLoading] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [editor, setEditor] = useState<ThemeEditorState>(CLOSED_EDITOR);
 
   useEffect(() => {
-    if (accessToken) {
-      fetchThemeSettings();
-    }
-  }, [accessToken]);
-
-  const parseCssToColors = (
-    css: string
-  ): { light: Record<string, string>, dark: Record<string, string>, extra: string } => {
-    const light: Record<string, string> = {};
-    const dark: Record<string, string> = {};
-    const extraParts: string[] = [];
-
-    const rootMatch = css.match(/:root\s*\{([^}]+)\}/g);
-    const darkMatch = css.match(/\.dark\s*\{([^}]+)\}/g);
-
-    if (rootMatch) {
-      for (const block of rootMatch) {
-        const inner = block.replace(/:root\s*\{/, "").replace(/\}/, "");
-        for (const line of inner.split(";")) {
-          const match = line.match(/--([\w-]+)\s*:\s*([^;]+)/);
-          if (match) {
-            if (match[1].startsWith("color") || LIGHT_VARS.some(v => v.key === match[1])) {
-              light[match[1]] = match[2].trim();
-            } else {
-              extraParts.push(`:root { --${match[1]}: ${match[2].trim()}; }`);
-            }
-          }
+    if (!accessToken) return;
+    const loadBranding = async () => {
+      try {
+        const proxyBaseUrl = getProxyBaseUrl();
+        const url = proxyBaseUrl ? `${proxyBaseUrl}/get/ui_theme_settings` : "/get/ui_theme_settings";
+        const response = await fetch(url, {
+          method: "GET",
+          headers: {
+            [getGlobalLitellmHeaderName()]: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+          },
+        });
+        if (response.ok) {
+          const data = await response.json();
+          setLogoUrlInput(data.values?.logo_url || "");
+          setLogoUrlDarkInput(data.values?.logo_url_dark || "");
+          setFaviconUrlInput(data.values?.favicon_url || "");
+          setLogoUrl(data.values?.logo_url || null);
+          setLogoUrlDark(data.values?.logo_url_dark || null);
+          setFaviconUrl(data.values?.favicon_url || null);
         }
-      }
-    }
-
-    if (darkMatch) {
-      for (const block of darkMatch) {
-        const inner = block.replace(/\.dark\s*\{/, "").replace(/\}/, "");
-        for (const line of inner.split(";")) {
-          const match = line.match(/--([\w-]+)\s*:\s*([^;]+)/);
-          if (match) {
-            if (match[1].startsWith("color") || DARK_VARS.some(v => v.key === match[1])) {
-              dark[match[1]] = match[2].trim();
-            } else {
-              extraParts.push(`.dark { --${match[1]}: ${match[2].trim()}; }`);
-            }
-          }
-        }
-      }
-    }
-
-    return { light, dark, extra: extraParts.join("\n") };
-  };
-
-  const fetchThemeSettings = async () => {
-    try {
-      const proxyBaseUrl = getProxyBaseUrl();
-      const url = proxyBaseUrl ? `${proxyBaseUrl}/get/ui_theme_settings` : "/get/ui_theme_settings";
-      const response = await fetch(url, {
-        method: "GET",
-        headers: {
-          [getGlobalLitellmHeaderName()]: `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
-        },
-      });
-      if (response.ok) {
-        const data = await response.json();
-        setLogoUrlInput(data.values?.logo_url || "");
-        setLogoUrlDarkInput(data.values?.logo_url_dark || "");
-        setFaviconUrlInput(data.values?.favicon_url || "");
-        setLogoUrl(data.values?.logo_url || null);
-        setLogoUrlDark(data.values?.logo_url_dark || null);
-        setFaviconUrl(data.values?.favicon_url || null);
-
-        const rawCss = data.values?.custom_theme_css || "";
-        if (rawCss) {
-          const parsed = parseCssToColors(rawCss);
-          setLightColors(parsed.light);
-          setDarkColors(parsed.dark);
-          setAdvancedCss(parsed.extra);
-          setCustomThemeCss(rawCss);
-        }
-      }
-    } catch (error) {
-      console.error("Error fetching theme settings:", error);
-    }
-  };
-
-  const updateColor = useCallback((mode: "light" | "dark", key: string, value: string) => {
-    const setColors = mode === "light" ? setLightColors : setDarkColors;
-    setColors((prev) => {
-      const next = { ...prev, [key]: value };
-      const css = generateCss(
-        mode === "light" ? next : lightColors,
-        mode === "dark" ? next : darkColors,
-        advancedCss
-      );
-      setCustomThemeCss(css || null);
-      return next;
-    });
-  }, [lightColors, darkColors, advancedCss, setCustomThemeCss]);
-
-  const handleAdvancedChange = (value: string) => {
-    setAdvancedCss(value);
-    const css = generateCss(lightColors, darkColors, value);
-    setCustomThemeCss(css || null);
-  };
-
-  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    if (file.size > 65536) {
-      toast.error("File too large. Maximum size is 64KB.");
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const content = e.target?.result;
-      if (typeof content === "string") {
-        const parsed = parseCssToColors(content);
-        setLightColors(parsed.light);
-        setDarkColors(parsed.dark);
-        setAdvancedCss(parsed.extra);
-        const css = generateCss(parsed.light, parsed.dark, parsed.extra);
-        setCustomThemeCss(css || null);
-        toast.success(`Loaded "${file.name}"`);
+      } catch (error) {
+        console.error("Error loading branding settings:", error);
       }
     };
-    reader.readAsText(file);
-    if (fileInputRef.current) fileInputRef.current.value = "";
-  };
+    loadBranding();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- context setters are stable per-provider
+  }, [accessToken]);
 
-  const handleSave = async () => {
-    setLoading(true);
-    try {
+  const patchSettings = useCallback(
+    async (body: Record<string, unknown>) => {
       const proxyBaseUrl = getProxyBaseUrl();
       const url = proxyBaseUrl ? `${proxyBaseUrl}/update/ui_theme_settings` : "/update/ui_theme_settings";
-      const css = generateCss(lightColors, darkColors, advancedCss);
       const response = await fetch(url, {
         method: "PATCH",
         headers: {
           [getGlobalLitellmHeaderName()]: `Bearer ${accessToken}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          logo_url: logoUrlInput || null,
-          logo_url_dark: logoUrlDarkInput || null,
-          favicon_url: faviconUrlInput || null,
-          custom_theme_css: css || null,
-        }),
+        body: JSON.stringify(body),
       });
-      if (response.ok) {
-        toast.success("Theme settings updated successfully!");
-      } else {
-        throw new Error("Failed to update settings");
-      }
+      if (!response.ok) throw new Error("Failed to update settings");
+    },
+    [accessToken],
+  );
+
+  const handleSaveBranding = async () => {
+    setLoading(true);
+    try {
+      await patchSettings({
+        logo_url: logoUrlInput || null,
+        logo_url_dark: logoUrlDarkInput || null,
+        favicon_url: faviconUrlInput || null,
+        custom_theme_css: customThemeCss,
+        themes,
+      });
+      setLogoUrl(logoUrlInput || null);
+      setLogoUrlDark(logoUrlDarkInput || null);
+      setFaviconUrl(faviconUrlInput || null);
+      toast.success("Theme settings updated successfully!");
     } catch (error) {
       console.error("Error updating theme settings:", error);
       toast.fromError("Failed to update theme settings");
@@ -242,39 +162,23 @@ const UIThemeSettings: React.FC<UIThemeSettingsProps> = ({ userID, userRole, acc
     }
   };
 
-  const handleReset = async () => {
+  const handleResetBranding = async () => {
     setLogoUrlInput("");
     setLogoUrlDarkInput("");
     setFaviconUrlInput("");
-    setLightColors({});
-    setDarkColors({});
-    setAdvancedCss("");
     setLogoUrl(null);
     setLogoUrlDark(null);
     setFaviconUrl(null);
-    setCustomThemeCss(null);
     setLoading(true);
     try {
-      const proxyBaseUrl = getProxyBaseUrl();
-      const url = proxyBaseUrl ? `${proxyBaseUrl}/update/ui_theme_settings` : "/update/ui_theme_settings";
-      const response = await fetch(url, {
-        method: "PATCH",
-        headers: {
-          [getGlobalLitellmHeaderName()]: `Bearer ${accessToken}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          logo_url: null,
-          logo_url_dark: null,
-          favicon_url: null,
-          custom_theme_css: null,
-        }),
+      await patchSettings({
+        logo_url: null,
+        logo_url_dark: null,
+        favicon_url: null,
+        custom_theme_css: null,
+        themes,
       });
-      if (response.ok) {
-        toast.success("Theme settings reset to default!");
-      } else {
-        throw new Error("Failed to reset");
-      }
+      toast.success("Theme settings reset to default!");
     } catch (error) {
       console.error("Error resetting theme settings:", error);
       toast.fromError("Failed to reset theme settings");
@@ -283,43 +187,97 @@ const UIThemeSettings: React.FC<UIThemeSettingsProps> = ({ userID, userRole, acc
     }
   };
 
-  const ColorGrid: React.FC<{
-    title: string;
-    vars: ColorVar[];
-    colors: Record<string, string>;
-    onChange: (key: string, value: string) => void;
-  }> = ({ title, vars, colors, onChange }) => (
-    <div>
-      <h3 className="mb-3 text-sm font-semibold">{title}</h3>
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-5">
-        {vars.map((v) => (
-          <div key={v.key} className="group flex flex-col items-center gap-1.5 rounded-lg border p-2">
-            <div
-              className="relative h-8 w-full overflow-hidden rounded-md border"
-              style={{ backgroundColor: colors[v.key] || "transparent" }}
-            >
-              <input
-                type="color"
-                className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
-                value={colors[v.key] || "#ffffff"}
-                onChange={(e) => onChange(v.key, e.target.value)}
-              />
-              {colors[v.key] && (
-                <button
-                  className="absolute right-0.5 top-0.5 rounded-full bg-black/30 p-0.5 text-white opacity-0 transition-opacity group-hover:opacity-100"
-                  onClick={() => onChange(v.key, "")}
-                  title="Reset"
-                >
-                  <X className="size-3" />
-                </button>
-              )}
-            </div>
-            <span className="text-center text-[10px] font-medium leading-tight">{v.label}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
+  const openNewTheme = () => {
+    setEditor({ open: true, draftName: "", draftColors: {}, editingOriginalName: null });
+  };
+
+  const openEditTheme = (theme: UITheme) => {
+    setEditor({
+      open: true,
+      draftName: theme.name,
+      draftColors: { ...theme.palette.colors },
+      editingOriginalName: theme.name,
+    });
+  };
+
+  const updateDraftColor = (key: string, value: string) => {
+    setEditor((prev) => ({ ...prev, draftColors: { ...prev.draftColors, [key]: value } }));
+  };
+
+  const handleSaveTheme = async () => {
+    const name = editor.draftName.trim();
+    if (!name) {
+      toast.error("Theme name is required");
+      return;
+    }
+    const duplicate = themes.some(
+      (t) => t.name.toLowerCase() === name.toLowerCase() && t.name !== editor.editingOriginalName,
+    );
+    if (duplicate) {
+      toast.error("A theme with that name already exists");
+      return;
+    }
+    const colors = Object.fromEntries(
+      THEME_VAR_OPTIONS.map((v) => [v.key, editor.draftColors[v.key] ?? ""]).filter(([, value]) => value),
+    );
+    const nextThemes = [...themes.filter((t) => t.name !== editor.editingOriginalName), { name, palette: { colors } }];
+    setLoading(true);
+    try {
+      await patchSettings({
+        logo_url: logoUrl,
+        logo_url_dark: logoUrlDark,
+        favicon_url: faviconUrl,
+        custom_theme_css: customThemeCss,
+        themes: nextThemes,
+      });
+      setThemes(nextThemes);
+      setEditor(CLOSED_EDITOR);
+      toast.success(editor.editingOriginalName === null ? `Theme "${name}" created!` : `Theme "${name}" updated!`);
+    } catch (error) {
+      console.error("Error saving theme:", error);
+      toast.fromError("Failed to save theme");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDeleteTheme = async (name: string) => {
+    if (!window.confirm(`Delete theme "${name}"?`)) return;
+    const nextThemes = themes.filter((t) => t.name !== name);
+    setLoading(true);
+    try {
+      await patchSettings({
+        logo_url: logoUrl,
+        logo_url_dark: logoUrlDark,
+        favicon_url: faviconUrl,
+        custom_theme_css: customThemeCss,
+        themes: nextThemes,
+      });
+      setThemes(nextThemes);
+      if (activeThemeId === name) setActiveThemeId(null);
+      toast.success(`Theme "${name}" deleted`);
+    } catch (error) {
+      console.error("Error deleting theme:", error);
+      toast.fromError("Failed to delete theme");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const exportThemeDownload = (theme: UITheme) => {
+    const css = themeToCss(theme);
+    const blob = new Blob([css], { type: "text/css" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${safeFilename(theme.name)}.css`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const themeSwatches = (theme: UITheme) => Object.values(theme.palette?.colors ?? {}).filter(Boolean).slice(0, 6);
 
   if (!accessToken) {
     return null;
@@ -328,59 +286,185 @@ const UIThemeSettings: React.FC<UIThemeSettingsProps> = ({ userID, userRole, acc
   return (
     <div className="w-full mx-auto max-w-4xl px-6 py-8">
       <div className="mb-8">
-        <h1 className="mb-2 text-2xl font-bold">Theme Customization</h1>
-        <p className="text-sm text-muted-foreground">
-          Customize your LiteLLM dashboard colors, logo, and favicon.
-        </p>
+        <h1 className="mb-2 text-2xl font-bold">Themes</h1>
+        <p className="text-sm text-muted-foreground">Pick a theme to personalize your dashboard, and manage your logo and favicon.</p>
       </div>
 
       <div className="space-y-6">
         <Card>
-          <CardContent className="space-y-6 pt-6">
-            <div className="flex items-center gap-2">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
               <Palette className="size-4" />
-              <h2 className="text-sm font-semibold">Theme Colors</h2>
+              Choose a theme
+            </CardTitle>
+            <CardDescription>
+              Themes apply to the whole dashboard. Your choice is saved to this browser.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => setActiveThemeId(null)}
+                className={`rounded-lg border px-3 py-2 text-sm transition-colors ${
+                  activeThemeId === null
+                    ? "border-primary bg-primary/10 text-primary"
+                    : "border-border hover:bg-muted"
+                }`}
+              >
+                Default
+              </button>
+              {allThemes.map((theme) => (
+                <button
+                  key={theme.name}
+                  type="button"
+                  onClick={() => setActiveThemeId(theme.name)}
+                  className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors ${
+                    activeThemeId === theme.name
+                      ? "border-primary bg-primary/10 text-primary"
+                      : "border-border hover:bg-muted"
+                  }`}
+                >
+                  <span className="flex -space-x-1">
+                    {themeSwatches(theme).map((color, i) => (
+                      <span key={i} className="h-3 w-3 rounded-full border border-background" style={{ backgroundColor: color }} />
+                    ))}
+                  </span>
+                  {theme.name}
+                </button>
+              ))}
             </div>
-            <p className="text-xs text-muted-foreground">
-              Pick colors to override the default theme. Click a swatch to choose a color, or click the X on a swatch to reset it. Changes apply live.
-            </p>
-
-            <ColorGrid
-              title="Light Mode"
-              vars={LIGHT_VARS}
-              colors={lightColors}
-              onChange={(key, value) => updateColor("light", key, value)}
-            />
-
-            <ColorGrid
-              title="Dark Mode"
-              vars={DARK_VARS}
-              colors={darkColors}
-              onChange={(key, value) => updateColor("dark", key, value)}
-            />
           </CardContent>
         </Card>
 
-        <Card>
-          <CardContent className="space-y-4 pt-6">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Upload className="size-4" />
-                <h2 className="text-sm font-semibold">Logo & Favicon</h2>
-              </div>
-              <Button variant="outline" size="sm" onClick={() => fileInputRef.current?.click()}>
-                <Upload className="size-3.5 mr-1.5" />
-                Upload CSS File
-              </Button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".css,.txt"
-                className="hidden"
-                onChange={handleFileUpload}
-              />
-            </div>
+        {isAdmin && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Palette className="size-4" />
+                Manage themes
+              </CardTitle>
+              <CardDescription>Create, edit, and export named color themes.</CardDescription>
+              <CardAction>
+                <Button size="sm" variant="outline" onClick={openNewTheme} disabled={loading}>
+                  <Plus className="size-3.5 mr-1.5" />
+                  New theme
+                </Button>
+              </CardAction>
+            </CardHeader>
+            <CardContent>
+              {themes.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No themes yet. Create one to get started.</p>
+              ) : (
+                <ul className="divide-y">
+                  {themes.map((theme) => {
+                    const css = themeToCss(theme);
+                    return (
+                      <li key={theme.name} className="flex flex-wrap items-center justify-between gap-3 py-3">
+                        <div className="flex items-center gap-2">
+                          <span className="flex -space-x-1">
+                            {themeSwatches(theme).map((color, i) => (
+                              <span key={i} className="h-3.5 w-3.5 rounded-full border border-background" style={{ backgroundColor: color }} />
+                            ))}
+                          </span>
+                          <span className="text-sm font-medium">{theme.name}</span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <Button size="icon-sm" variant="ghost" onClick={() => openEditTheme(theme)} title="Edit theme" disabled={loading}>
+                            <Pencil className="size-3.5" />
+                          </Button>
+                          <Button
+                            size="icon-sm"
+                            variant="ghost"
+                            onClick={() => exportThemeDownload(theme)}
+                            title="Download theme CSS"
+                            disabled={loading}
+                          >
+                            <Download className="size-3.5" />
+                          </Button>
+                          <CopyToClipboard text={css} onCopy={() => toast.success(`Copied "${theme.name}" CSS to clipboard`)}>
+                            <Button size="icon-sm" variant="ghost" title="Copy theme CSS" disabled={loading}>
+                              <Copy className="size-3.5" />
+                            </Button>
+                          </CopyToClipboard>
+                          <Button
+                            size="icon-sm"
+                            variant="ghost"
+                            onClick={() => handleDeleteTheme(theme.name)}
+                            title="Delete theme"
+                            disabled={loading}
+                          >
+                            <Trash2 className="size-3.5" />
+                          </Button>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
 
+              {editor.open && (
+                <div className="mt-4 rounded-lg border p-4">
+                  <h3 className="mb-3 text-sm font-semibold">
+                    {editor.editingOriginalName === null ? "New theme" : `Edit: ${editor.editingOriginalName}`}
+                  </h3>
+                  <div className="mb-4 flex items-end gap-2">
+                    <div className="flex-1">
+                      <Label htmlFor="theme-name" className="mb-1 text-xs">Name</Label>
+                      <Input
+                        id="theme-name"
+                        value={editor.draftName}
+                        maxLength={64}
+                        placeholder="e.g. Ocean"
+                        onChange={(e) => setEditor((prev) => ({ ...prev, draftName: e.target.value }))}
+                      />
+                    </div>
+                    <Button variant="outline" size="sm" onClick={() => setEditor(CLOSED_EDITOR)}>
+                      <X className="size-3.5 mr-1.5" />
+                      Cancel
+                    </Button>
+                    <Button size="sm" onClick={handleSaveTheme} disabled={loading}>
+                      {loading && <UiLoadingSpinner className="size-3.5" />}
+                      <Check className="size-3.5 mr-1.5" />
+                      Save theme
+                    </Button>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    {THEME_VAR_OPTIONS.map((v) => (
+                      <div key={v.key} className="rounded-lg border p-2">
+                        <div className="mb-1.5 flex items-center justify-between">
+                          <Label htmlFor={`theme-color-${v.key}`} className="text-xs font-medium">{v.label}</Label>
+                          {editor.draftColors[v.key] && (
+                            <button
+                              type="button"
+                              className="text-xs text-muted-foreground hover:text-foreground"
+                              onClick={() => updateDraftColor(v.key, "")}
+                            >
+                              Clear
+                            </button>
+                          )}
+                        </div>
+                        <ColorPicker
+                          id={`theme-color-${v.key}`}
+                          label={v.label}
+                          value={editor.draftColors[v.key] || "#888888"}
+                          onChange={(hex) => updateDraftColor(v.key, hex)}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        )}
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Logo &amp; Favicon</CardTitle>
+            <CardDescription>Set a custom logo and favicon for the dashboard.</CardDescription>
+          </CardHeader>
+          <CardContent>
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
                 <Label htmlFor="ui-theme-logo-url" className="mb-2 text-xs">Custom Logo (light)</Label>
@@ -388,10 +472,7 @@ const UIThemeSettings: React.FC<UIThemeSettingsProps> = ({ userID, userRole, acc
                   id="ui-theme-logo-url"
                   placeholder="https://example.com/logo.png"
                   value={logoUrlInput}
-                  onChange={(event) => {
-                    setLogoUrlInput(event.target.value);
-                    setLogoUrl(event.target.value || null);
-                  }}
+                  onChange={(event) => setLogoUrlInput(event.target.value)}
                 />
               </div>
               <div>
@@ -400,10 +481,7 @@ const UIThemeSettings: React.FC<UIThemeSettingsProps> = ({ userID, userRole, acc
                   id="ui-theme-logo-url-dark"
                   placeholder="https://example.com/logo-dark.png"
                   value={logoUrlDarkInput}
-                  onChange={(event) => {
-                    setLogoUrlDarkInput(event.target.value);
-                    setLogoUrlDark(event.target.value || null);
-                  }}
+                  onChange={(event) => setLogoUrlDarkInput(event.target.value)}
                 />
               </div>
               <div className="sm:col-span-2">
@@ -412,48 +490,19 @@ const UIThemeSettings: React.FC<UIThemeSettingsProps> = ({ userID, userRole, acc
                   id="ui-theme-favicon-url"
                   placeholder="https://example.com/favicon.ico"
                   value={faviconUrlInput}
-                  onChange={(event) => {
-                    setFaviconUrlInput(event.target.value);
-                    setFaviconUrl(event.target.value || null);
-                  }}
+                  onChange={(event) => setFaviconUrlInput(event.target.value)}
                 />
               </div>
             </div>
           </CardContent>
         </Card>
 
-        <Card>
-          <CardContent className="pt-6">
-            <button
-              className="flex w-full items-center justify-between"
-              onClick={() => setShowAdvanced(!showAdvanced)}
-            >
-              <span className="text-sm font-semibold">Advanced CSS</span>
-              {showAdvanced ? <ChevronUp className="size-4" /> : <ChevronDown className="size-4" />}
-            </button>
-            {showAdvanced && (
-              <div className="mt-3">
-                <Textarea
-                  placeholder={`/* Additional CSS rules beyond the color pickers above */\n/* Example: */\n/* :root { --radius: 1rem; } */`}
-                  value={advancedCss}
-                  onChange={(event) => handleAdvancedChange(event.target.value)}
-                  rows={8}
-                  className="font-mono text-xs resize-y min-h-[120px]"
-                />
-                <p className="mt-1 text-xs text-muted-foreground">
-                  For anything the color pickers don't cover: radius, shadows, layout tweaks, or non-color variables.
-                </p>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
         <div className="flex gap-3">
-          <Button onClick={handleSave} disabled={loading}>
+          <Button onClick={handleSaveBranding} disabled={loading}>
             {loading && <UiLoadingSpinner className="size-4" />}
             Save Changes
           </Button>
-          <Button variant="outline" onClick={handleReset} disabled={loading}>
+          <Button variant="outline" onClick={handleResetBranding} disabled={loading}>
             {loading && <UiLoadingSpinner className="size-4" />}
             Reset to Default
           </Button>
